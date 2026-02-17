@@ -15,7 +15,7 @@
 
 # Overview
 
-TODO
+This is a set of Golang packages for the Bytecode Alliance componentize-go project.
 
 ## Questions?
 
