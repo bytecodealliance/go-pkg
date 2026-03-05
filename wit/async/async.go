@@ -218,22 +218,29 @@ func Yield() {
 }
 
 //go:wasmimport $root [waitable-set-new]
+//go:noescape
 func waitableSetNew() uint32
 
 //go:wasmimport $root [waitable-set-poll]
+//go:noescape
 func waitableSetPoll(waitableSet uint32, eventPayload unsafe.Pointer) uint32
 
 //go:wasmimport $root [waitable-set-drop]
+//go:noescape
 func waitableSetDrop(waitableSet uint32)
 
 //go:wasmimport $root [waitable-join]
+//go:noescape
 func waitableJoin(waitable, waitableSet uint32)
 
 //go:wasmimport $root [context-get-0]
+//go:noescape
 func contextGet() unsafe.Pointer
 
 //go:wasmimport $root [context-set-0]
+//go:noescape
 func contextSet(value unsafe.Pointer)
 
 //go:wasmimport $root [subtask-drop]
+//go:noescape
 func subtaskDrop(subtask uint32)
