@@ -49,11 +49,11 @@ func wasiHandle(request *types.IncomingRequest, responseOut *types.ResponseOutpa
 		return
 	}
 	if httpReq.Body != nil {
-		defer httpReq.Body.Close()
+		defer func() { _ = httpReq.Body.Close() }()
 	}
 
 	httpRes := newResponseOutparamWriter(responseOut)
-	defer httpRes.Close()
+	defer func() { _ = httpRes.Close() }()
 
 	handlerFn(httpRes, httpReq)
 }

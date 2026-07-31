@@ -99,7 +99,7 @@ func (r *Transport) RoundTrip(incomingRequest *http.Request) (*http.Response, er
 	// NOTE(lxf): If request includes a body, copy it to the adapted wasi body
 	if incomingRequest.Body != nil {
 		// For client requests, the Transport is responsible for calling Close on request's body.
-		defer incomingRequest.Body.Close()
+		defer func() { _ = incomingRequest.Body.Close() }()
 		adaptedBody, err := newOutgoingBody(body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to adapt body: %w", err)
