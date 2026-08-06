@@ -7,6 +7,10 @@
 *.dll
 *.so
 *.dylib
+*.wasm
+
+# Scratch directory used by regenerate_bindings.sh
+tmp/
 
 # Test binary, built with `go test -c`
 *.test

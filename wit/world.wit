@@ -1,0 +1,24 @@
+package bytecodealliance:pkg@0.1.0;
+
+// Default world: sync WASI P2 HTTP handler, buildable with stock Go.
+world wasip2 {
+  include wasi:cli/imports@0.2.8;
+
+  import wasi:config/store@0.2.0-rc.1;
+  import wasi:logging/logging@0.1.0-draft;
+  import wasi:http/outgoing-handler@0.2.8;
+
+  export wasi:http/incoming-handler@0.2.8;
+}
+
+// Opt-in world: async WASI P3 HTTP handler. Building this world requires a
+// Go toolchain with runtime.wasiOnIdle (auto-installed by componentize-go)
+// until golang/go#76775 lands.
+world wasip3 {
+  // Brings in the P3 handler export plus client, cli, clocks, and random
+  // imports.
+  include wasi:http/service@0.3.0;
+
+  import wasi:config/store@0.2.0-rc.1;
+  import wasi:logging/logging@0.1.0-draft;
+}
