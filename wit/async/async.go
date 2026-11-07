@@ -11,18 +11,21 @@ import (
 // Note: These constants have specific values defined by the canonical ABI, so we use explicit values instead of iota.
 
 const (
-	EVENT_NONE         uint32 = 0
-	EVENT_SUBTASK      uint32 = 1
-	EVENT_STREAM_READ  uint32 = 2
-	EVENT_STREAM_WRITE uint32 = 3
-	EVENT_FUTURE_READ  uint32 = 4
-	EVENT_FUTURE_WRITE uint32 = 5
+	EVENT_NONE           uint32 = 0
+	EVENT_SUBTASK        uint32 = 1
+	EVENT_STREAM_READ    uint32 = 2
+	EVENT_STREAM_WRITE   uint32 = 3
+	EVENT_FUTURE_READ    uint32 = 4
+	EVENT_FUTURE_WRITE   uint32 = 5
+	EVENT_TASK_CANCELLED uint32 = 6
 )
 
 const (
-	STATUS_STARTING uint32 = 0
-	STATUS_STARTED  uint32 = 1
-	STATUS_RETURNED uint32 = 2
+	STATUS_STARTING                  uint32 = 0
+	STATUS_STARTED                   uint32 = 1
+	STATUS_RETURNED                  uint32 = 2
+	STATUS_CANCELLED_BEFORE_STARTED  uint32 = 3
+	STATUS_CANCELLED_BEFORE_RETURNED uint32 = 4
 )
 
 const (
@@ -35,16 +38,24 @@ const (
 	RETURN_CODE_BLOCKED   uint32 = 0xFFFFFFFF
 	RETURN_CODE_COMPLETED uint32 = 0
 	RETURN_CODE_DROPPED   uint32 = 1
+	RETURN_CODE_CANCELLED uint32 = 2
 )
+
+type wakeup struct {
+	code      uint32
+	cancelled bool
+}
 
 type unit struct{}
 
 type taskState struct {
 	channel     chan unit
 	waitableSet uint32
-	pending     map[uint32]chan uint32
+	pending     map[uint32]chan wakeup
 	yielding    chan unit
 	pinner      runtime.Pinner
+	cancelled   bool
+	returned    bool
 }
 
 var state *taskState = nil
@@ -53,9 +64,11 @@ func Run(closure func()) uint32 {
 	state = &taskState{
 		make(chan unit),
 		0,
-		make(map[uint32]chan uint32),
+		make(map[uint32]chan wakeup),
 		nil,
 		runtime.Pinner{},
+		false,
+		false,
 	}
 	state.pinner.Pin(state)
 
@@ -63,7 +76,11 @@ func Run(closure func()) uint32 {
 		state = nil
 	}()
 
-	go closure()
+	s := state
+	go func() {
+		closure()
+		s.returned = true
+	}()
 
 	return callback(EVENT_NONE, 0, 0)
 }
@@ -117,7 +134,7 @@ func callback(event0, event1, event2 uint32) uint32 {
 				subtaskDrop(event1)
 				channel := state.pending[event1]
 				delete(state.pending, event1)
-				channel <- event2
+				channel <- wakeup{code: event2}
 
 			default:
 				panic("todo")
@@ -127,7 +144,14 @@ func callback(event0, event1, event2 uint32) uint32 {
 			waitableJoin(event1, 0)
 			channel := state.pending[event1]
 			delete(state.pending, event1)
-			channel <- event2
+			channel <- wakeup{code: event2}
+
+		case EVENT_TASK_CANCELLED:
+			state.cancelled = true
+			for waitable, channel := range state.pending {
+				delete(state.pending, waitable)
+				channel <- wakeup{cancelled: true}
+			}
 
 		default:
 			panic("todo")
@@ -162,6 +186,9 @@ func callback(event0, event1, event2 uint32) uint32 {
 			if state.waitableSet != 0 {
 				waitableSetDrop(state.waitableSet)
 			}
+			if state.cancelled && !state.returned {
+				taskCancel()
+			}
 			return CALLBACK_CODE_EXIT
 		} else {
 			if state.waitableSet == 0 {
@@ -179,13 +206,21 @@ func SubtaskWait(status uint32) {
 
 	switch status {
 	case STATUS_STARTING, STATUS_STARTED:
-		if state.waitableSet == 0 {
-			state.waitableSet = waitableSetNew()
+		if !state.cancelled {
+			if state.waitableSet == 0 {
+				state.waitableSet = waitableSetNew()
+			}
+			waitableJoin(subtask, state.waitableSet)
+			channel := make(chan wakeup)
+			state.pending[subtask] = channel
+			if !(<-channel).cancelled {
+				return
+			}
+			waitableJoin(subtask, 0)
 		}
-		waitableJoin(subtask, state.waitableSet)
-		channel := make(chan uint32)
-		state.pending[subtask] = channel
-		(<-channel)
+		subtaskCancel(subtask)
+		subtaskDrop(subtask)
+		runtime.Goexit()
 
 	case STATUS_RETURNED:
 
@@ -194,15 +229,32 @@ func SubtaskWait(status uint32) {
 	}
 }
 
-func FutureOrStreamWait(code uint32, handle int32) (uint32, uint32) {
+func wait(waitable uint32) wakeup {
+	if state.cancelled {
+		return wakeup{cancelled: true}
+	}
+	if state.waitableSet == 0 {
+		state.waitableSet = waitableSetNew()
+	}
+	waitableJoin(waitable, state.waitableSet)
+	channel := make(chan wakeup)
+	state.pending[waitable] = channel
+	return <-channel
+}
+
+func FutureOrStreamWait(code uint32, handle int32, cancel func(int32) uint32) (uint32, uint32) {
+	if cancel == nil {
+		panic("task cancelled: bindings lack cancel intrinsics; regenerate with a newer wit-bindgen")
+	}
+
 	if code == RETURN_CODE_BLOCKED {
-		if state.waitableSet == 0 {
-			state.waitableSet = waitableSetNew()
+		result := wait(uint32(handle))
+		if result.cancelled {
+			waitableJoin(uint32(handle), 0)
+			cancel(handle) // sync cancel; a racing completion is discarded, as Rust's drop does
+			runtime.Goexit()
 		}
-		waitableJoin(uint32(handle), state.waitableSet)
-		channel := make(chan uint32)
-		state.pending[uint32(handle)] = channel
-		code = (<-channel)
+		code = result.code
 	}
 
 	count := code >> 4
@@ -215,6 +267,10 @@ func Yield() {
 	channel := make(chan unit)
 	state.yielding = channel
 	(<-channel)
+
+	if state.cancelled {
+		runtime.Goexit()
+	}
 }
 
 //go:wasmimport $root [waitable-set-new]
@@ -244,3 +300,11 @@ func contextSet(value unsafe.Pointer)
 //go:wasmimport $root [subtask-drop]
 //go:noescape
 func subtaskDrop(subtask uint32)
+
+//go:wasmimport [export]$root [task-cancel]
+//go:noescape
+func taskCancel()
+
+//go:wasmimport $root [subtask-cancel]
+//go:noescape
+func subtaskCancel(subtask uint32) uint32

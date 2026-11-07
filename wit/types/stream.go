@@ -46,9 +46,23 @@ func (self *StreamReader[T]) Read(dst []T) uint32 {
 	}
 
 	handle := self.handle.Take()
-	defer self.handle.Set(handle)
+
+	// If the task is cancelled, `FutureOrStreamWait` calls `runtime.Goexit`
+	// and `returned` stays false, so drop the handle rather than restoring it.
+	// Otherwise a reader that is still reachable (and so never cleaned up by
+	// the GC) would keep the handle open, leaving the writer blocked forever
+	// unless the user explicitly calls `Drop`.
+	returned := false
+	defer func() {
+		if returned {
+			self.handle.Set(handle)
+		} else {
+			self.vtable.DropReadable(handle)
+		}
+	}()
 
 	if self.writerDropped {
+		returned = true
 		return 0
 	}
 
@@ -67,7 +81,8 @@ func (self *StreamReader[T]) Read(dst []T) uint32 {
 	}
 	pinner.Pin(buffer)
 
-	code, count := witAsync.FutureOrStreamWait(self.vtable.Read(handle, buffer, uint32(len(dst))), handle)
+	code, count := witAsync.FutureOrStreamWait(self.vtable.Read(handle, buffer, uint32(len(dst))), handle, self.vtable.CancelRead)
+	returned = true
 
 	if code == witAsync.RETURN_CODE_DROPPED {
 		self.writerDropped = true
@@ -127,9 +142,23 @@ func (self *StreamWriter[T]) ReaderDropped() bool {
 // Write will panic if multiple concurrent writes are attempted on the same stream.
 func (self *StreamWriter[T]) Write(items []T) uint32 {
 	handle := self.handle.Take()
-	defer self.handle.Set(handle)
+
+	// If the task is cancelled, `FutureOrStreamWait` calls `runtime.Goexit`
+	// and `returned` stays false, so drop the handle rather than restoring it.
+	// Otherwise a writer that is still reachable (and so never cleaned up by
+	// the GC) would keep the handle open, leaving the reader blocked forever
+	// unless the user explicitly calls `Drop`.
+	returned := false
+	defer func() {
+		if returned {
+			self.handle.Set(handle)
+		} else {
+			self.vtable.DropWritable(handle)
+		}
+	}()
 
 	if self.readerDropped {
+		returned = true
 		return 0
 	}
 
@@ -158,7 +187,8 @@ func (self *StreamWriter[T]) Write(items []T) uint32 {
 		}
 	}
 
-	code, count := witAsync.FutureOrStreamWait(self.vtable.Write(handle, buffer, writeCount), handle)
+	code, count := witAsync.FutureOrStreamWait(self.vtable.Write(handle, buffer, writeCount), handle, self.vtable.CancelWrite)
+	returned = true
 
 	if lifters != nil && count < writeCount {
 		for _, lifter := range lifters[count:] {
